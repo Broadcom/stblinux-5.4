@@ -213,6 +213,7 @@ static void __init zone_sizes_init(unsigned long min, unsigned long max_low,
 			arm_dma_zone_size >> PAGE_SHIFT);
 #endif
 
+	zero_resv_unavail();
 	free_area_init_node(0, zone_size, min, zhole_size);
 }
 

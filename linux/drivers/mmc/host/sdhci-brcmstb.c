@@ -234,10 +234,13 @@ static int sdhci_brcmstb_probe(struct platform_device *pdev)
 
 	dev_dbg(&pdev->dev, "Probe found match for %s\n",  match->compatible);
 
-	clk = devm_clk_get_optional(&pdev->dev, NULL);
-	if (IS_ERR(clk))
-		return PTR_ERR(clk);
-
+	clk = devm_clk_get(&pdev->dev, NULL);
+	if (IS_ERR(clk)) {
+		if (PTR_ERR(clk) == -EPROBE_DEFER)
+			return -EPROBE_DEFER;
+		dev_err(&pdev->dev, "Clock not found in Device Tree\n");
+		clk = NULL;
+	}
 	res = clk_prepare_enable(clk);
 	if (res)
 		return res;
@@ -315,6 +318,7 @@ static void sdhci_brcmstb_shutdown(struct platform_device *pdev)
 	struct sdhci_host *host = platform_get_drvdata(pdev);
 	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
 
+	sdhci_remove_host(host, 1);
 	clk_disable_unprepare(pltfm_host->clk);
 }
 

@@ -152,7 +152,7 @@ static void sdhci_set_card_detection(struct sdhci_host *host, bool enable)
 	u32 present;
 
 	if ((host->quirks & SDHCI_QUIRK_BROKEN_CARD_DETECTION) ||
-	    !mmc_card_is_removable(host->mmc))
+	    !mmc_card_is_removable(host->mmc) || mmc_can_gpio_cd(host->mmc))
 		return;
 
 	if (enable) {
@@ -2823,9 +2823,11 @@ static void sdhci_cmd_irq(struct sdhci_host *host, u32 intmask, u32 *intmask_p)
 		/*
 		 * SDHCI recovers from errors by resetting the cmd and data
 		 * circuits.  Until that is done, there very well might be more
-		 * interrupts, so ignore them in that case.
+		 * interrupts, so ignore them in that case. Also ignore
+		 * interrupts if "dead" to avoid spuriuos interrupts
+		 * during remove_host.
 		 */
-		if (host->pending_reset)
+		if (host->pending_reset || (host->flags & SDHCI_DEVICE_DEAD))
 			return;
 		pr_err("%s: Got command interrupt 0x%08x even though no command operation was in progress.\n",
 		       mmc_hostname(host->mmc), (unsigned)intmask);

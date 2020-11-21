@@ -1260,27 +1260,24 @@ static int bcm_sf2_sw_probe(struct platform_device *pdev)
 		base++;
 	}
 
-	priv->clk = of_clk_get_by_name(dn, "sw_switch");
-	if (IS_ERR(priv->clk)) {
-		if (PTR_ERR(priv->clk) == -EPROBE_DEFER)
-			return -EPROBE_DEFER;
+	priv->clk = devm_clk_get_optional(&pdev->dev, "sw_switch");
+	if (IS_ERR(priv->clk))
+		return PTR_ERR(priv->clk);
 
-		pr_warn("%s: failed to request clock\n", __func__);
-		priv->clk = NULL;
-	}
 	clk_prepare_enable(priv->clk);
 
-	priv->clk_mdiv = of_clk_get_by_name(dn, "sw_switch_mdiv");
+	priv->clk_mdiv = devm_clk_get_optional(&pdev->dev, "sw_switch_mdiv");
 	if (IS_ERR(priv->clk_mdiv)) {
-		pr_warn("%s: failed to request divider clock\n", __func__);
-		priv->clk_mdiv = NULL;
+		ret = PTR_ERR(priv->clk_mdiv);
+		goto out_clk;
 	}
+
 	clk_prepare_enable(priv->clk_mdiv);
 
 	ret = bcm_sf2_sw_rst(priv);
 	if (ret) {
 		pr_err("unable to software reset switch: %d\n", ret);
-		goto out_clk;
+		goto out_clk_mdiv;
 	}
 
 	bcm_sf2_gphy_enable_set(priv->dev->ds, true);
@@ -1288,7 +1285,7 @@ static int bcm_sf2_sw_probe(struct platform_device *pdev)
 	ret = bcm_sf2_mdio_register(ds);
 	if (ret) {
 		pr_err("failed to register MDIO bus\n");
-		goto out_clk;
+		goto out_clk_mdiv;
 	}
 
 	bcm_sf2_gphy_enable_set(priv->dev->ds, false);
@@ -1355,8 +1352,9 @@ static int bcm_sf2_sw_probe(struct platform_device *pdev)
 
 out_mdio:
 	bcm_sf2_mdio_unregister(priv);
-out_clk:
+out_clk_mdiv:
 	clk_disable_unprepare(priv->clk_mdiv);
+out_clk:
 	clk_disable_unprepare(priv->clk);
 	return ret;
 }
@@ -1371,6 +1369,8 @@ static int bcm_sf2_sw_remove(struct platform_device *pdev)
 	dsa_unregister_switch(priv->dev->ds);
 	bcm_sf2_cfp_exit(priv->dev->ds);
 	bcm_sf2_mdio_unregister(priv);
+	clk_disable_unprepare(priv->clk_mdiv);
+	clk_disable_unprepare(priv->clk);
 	if (priv->type == BCM7278_DEVICE_ID && !IS_ERR(priv->rcdev))
 		reset_control_assert(priv->rcdev);
 

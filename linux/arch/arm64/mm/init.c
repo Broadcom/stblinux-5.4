@@ -275,6 +275,7 @@ static void __init zone_sizes_init(unsigned long min, unsigned long max)
 		}
 	}
 
+	zero_resv_unavail();
 	free_area_init_node(0, zone_size, min, zhole_size);
 }
 

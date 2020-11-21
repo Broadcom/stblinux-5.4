@@ -84,6 +84,9 @@ static inline void sdhci_iproc_writel(struct sdhci_host *host, u32 val, int reg)
 
 	writel(val, host->ioaddr + reg);
 
+	/* The data register does not have the bug */
+	if (reg == SDHCI_BUFFER)
+		return;
 	if (host->clock <= 400000) {
 		/* Round up to micro-second four SD clock delay */
 		if (host->clock)
@@ -270,11 +273,35 @@ static const struct sdhci_iproc_data bcm2711_data = {
 	.pdata = &sdhci_bcm2711_pltfm_data,
 };
 
+static const struct sdhci_pltfm_data sdhci_bcm7211a0_pltfm_data = {
+	.quirks = SDHCI_QUIRK_MISSING_CAPS |
+		SDHCI_QUIRK_BROKEN_TIMEOUT_VAL |
+		SDHCI_QUIRK_BROKEN_DMA |
+		SDHCI_QUIRK_BROKEN_ADMA,
+	.ops = &sdhci_iproc_ops,
+};
+
+#define BCM7211A0_BASE_CLK_MHZ 100
+static const struct sdhci_iproc_data bcm7211a0_data = {
+	.pdata = &sdhci_bcm7211a0_pltfm_data,
+	.caps = ((BCM7211A0_BASE_CLK_MHZ / 2) << SDHCI_TIMEOUT_CLK_SHIFT) |
+		(BCM7211A0_BASE_CLK_MHZ << SDHCI_CLOCK_BASE_SHIFT) |
+		((0x2 << SDHCI_MAX_BLOCK_SHIFT)
+			& SDHCI_MAX_BLOCK_MASK) |
+		SDHCI_CAN_VDD_330 |
+		SDHCI_CAN_VDD_180 |
+		SDHCI_CAN_DO_SUSPEND |
+		SDHCI_CAN_DO_HISPD,
+	.caps1 = SDHCI_DRIVER_TYPE_C |
+		 SDHCI_DRIVER_TYPE_D,
+};
+
 static const struct of_device_id sdhci_iproc_of_match[] = {
 	{ .compatible = "brcm,bcm2835-sdhci", .data = &bcm2835_data },
 	{ .compatible = "brcm,bcm2711-emmc2", .data = &bcm2711_data },
 	{ .compatible = "brcm,sdhci-iproc-cygnus", .data = &iproc_cygnus_data},
 	{ .compatible = "brcm,sdhci-iproc", .data = &iproc_data },
+	{ .compatible = "brcm,bcm7211a0-sdhci", .data = &bcm7211a0_data },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, sdhci_iproc_of_match);
@@ -353,6 +380,7 @@ static void sdhci_iproc_shutdown(struct platform_device *pdev)
 	struct sdhci_host *host = platform_get_drvdata(pdev);
 	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
 
+	sdhci_remove_host(host, 1);
 	clk_disable_unprepare(pltfm_host->clk);
 }
 

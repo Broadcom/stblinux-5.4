@@ -49,9 +49,11 @@ enum brcm_protocol_cmd {
 	BRCM_RESET_ENABLE_CMD = 0x7,
 	BRCM_RESET_DISABLE_CMD = 0x8,
 	BRCM_OVERTEMP_RESET_CMD = 0x9,
+	BRCM_SCMI_STATS_SHOW_CMD = 0xa,
+	BRCM_SCMI_STATS_RESET_CMD = 0xb,
 };
 
-static const char *pmap_cores[BCLK_SW_NUM_CORES - BCLK_SW_OFFSET] = {
+static const char __maybe_unused *pmap_cores[BCLK_SW_NUM_CORES] = {
 	[BCLK_SW_CPU_CORE - BCLK_SW_OFFSET] = "cpu",
 	[BCLK_SW_V3D - BCLK_SW_OFFSET] = "v3d0",
 	[BCLK_SW_SYSIF - BCLK_SW_OFFSET] = "sysif0",
@@ -72,6 +74,8 @@ static const char *pmap_cores[BCLK_SW_NUM_CORES - BCLK_SW_OFFSET] = {
 	[BCLK_SW_VPU0 - BCLK_SW_OFFSET] = "vpu0",
 	[BCLK_SW_BNE0 - BCLK_SW_OFFSET] = "bne0",
 	[BCLK_SW_ASP0 - BCLK_SW_OFFSET] = "asp0",
+	[BCLK_SW_HVD_CABAC0 - BCLK_SW_OFFSET] = "hvd_cabac0",
+	[BCLK_SW_AXI0 - BCLK_SW_OFFSET] = "axi0",
 };
 
 static const struct scmi_handle *handle;
@@ -270,31 +274,74 @@ int brcm_pmap_num_pstates(unsigned int core_id, unsigned int *num_pstates)
 	if (!handle)
 		return -EINVAL;
 	perf_ops = handle->perf_ops;
-	if (core_id <= BCLK_SW_OFFSET || core_id >= BCLK_SW_NUM_CORES)
+	if (domain >= BCLK_SW_NUM_CORES)
 		return -EINVAL;
 
 	clk_api_lock();
 	ret = perf_ops->num_domain_opps_get(handle, domain, num_pstates);
 	clk_api_unlock();
 
-	return (ret == 0 && *num_pstates == 0) ? -EINVAL : ret;
+	if (!ret && (*num_pstates == 0 || *num_pstates > MAX_PSTATES))
+		ret = -EIO;
+
+	return ret;
 }
 EXPORT_SYMBOL(brcm_pmap_num_pstates);
 
-int brcm_pmap_get_pstate(unsigned int core_id, unsigned int *pstate)
+static int get_all_pmap_freq_info(int core_id, unsigned int *num_pstates,
+				  unsigned int *cur_pstate, unsigned int *freqs)
 {
 	struct scmi_perf_ops *perf_ops = handle->perf_ops;
 	unsigned int domain = core_id - BCLK_SW_OFFSET;
-	int ret;
+	int ret, i;
 
-	if (core_id <= BCLK_SW_OFFSET || core_id >= BCLK_SW_NUM_CORES)
+	if (domain >= BCLK_SW_NUM_CORES)
 		return -EINVAL;
 
-	clk_api_lock();
-	ret = perf_ops->level_get(handle, domain, pstate, false);
-	clk_api_unlock();
+	memset(freqs, 0, sizeof(*freqs) * MAX_PSTATES);
 
-	return ret;
+	ret = brcm_pmap_num_pstates(core_id, num_pstates);
+	if (ret < 0)
+		return ret;
+
+	clk_api_lock();
+	ret = perf_ops->level_get(handle, domain, cur_pstate, false);
+	clk_api_unlock();
+	if (ret < 0)
+		return ret;
+
+	ret = brcm_pmap_get_pstate_freqs(core_id, freqs);
+	if (ret < 0)
+		return ret;
+
+	/*
+	 * For the CPU domain only the ->level_get() call returns
+	 * the frequency and this has to be converted into
+	 * our idea of a pstate number.
+	 */
+	if (domain == 0) {
+		const unsigned int freq = *cur_pstate;
+
+		*cur_pstate = MAX_PSTATES + 1;
+		for (i = 0; i < *num_pstates; i++) {
+			if (freq == freqs[i]) {
+				*cur_pstate = i;
+				break;
+			}
+		}
+	}
+
+	if (*cur_pstate >= *num_pstates)
+		return -EIO;
+
+	return 0;
+}
+
+int brcm_pmap_get_pstate(unsigned int core_id, unsigned int *pstate)
+{
+	unsigned int num_pstates, freqs[MAX_PSTATES];
+
+	return get_all_pmap_freq_info(core_id, &num_pstates, pstate, freqs);
 }
 EXPORT_SYMBOL(brcm_pmap_get_pstate);
 
@@ -302,11 +349,34 @@ int brcm_pmap_set_pstate(unsigned int core_id, unsigned int pstate)
 {
 
 	struct scmi_perf_ops *perf_ops = handle->perf_ops;
-	unsigned int domain = core_id - BCLK_SW_OFFSET;
+	unsigned int num_pstates, domain = core_id - BCLK_SW_OFFSET;
 	int ret;
 
-	if (core_id <= BCLK_SW_OFFSET || core_id >= BCLK_SW_NUM_CORES)
+	if (domain >= BCLK_SW_NUM_CORES)
 		return -EINVAL;
+
+	if (pstate >= MAX_PSTATES)
+		return -EINVAL;
+
+	ret = brcm_pmap_num_pstates(core_id, &num_pstates);
+	if (ret)
+		return ret;
+	if (pstate >= num_pstates)
+		return -EINVAL;
+
+	/*
+	 * For the CPU domain only the ->level_set() call expects
+	 * the frequency as its argument whereas other cores
+	 * expect our idea of a pstate number.
+	 */
+	if (domain == 0) {
+		unsigned int freqs[MAX_PSTATES];
+
+		ret = brcm_pmap_get_pstate_freqs(core_id, freqs);
+		if (ret)
+			return ret;
+		pstate = freqs[pstate];
+	}
 
 	clk_api_lock();
 	ret = perf_ops->level_set(handle, domain, pstate, false);
@@ -323,7 +393,7 @@ int brcm_pmap_get_pstate_freqs(unsigned int core_id, u32 *freqs)
 	struct scmi_perf_ops *perf_ops = handle->perf_ops;
 	unsigned int domain = core_id - BCLK_SW_OFFSET;
 
-	if (core_id <= BCLK_SW_OFFSET || core_id >= BCLK_SW_NUM_CORES)
+	if (domain >= BCLK_SW_NUM_CORES)
 		return -EINVAL;
 
 	ret = brcm_pmap_num_pstates(core_id, &freq_cnt);
@@ -333,8 +403,9 @@ int brcm_pmap_get_pstate_freqs(unsigned int core_id, u32 *freqs)
 	clk_api_lock();
 	ret = perf_ops->domain_freqs_get(handle, domain, freqs);
 	/* sort frequencies in descending order */
-	for (i = 0; i < freq_cnt/2; i++)
-		swap(freqs[i], freqs[freq_cnt - i - 1]);
+	if (ret == 0)
+		for (i = 0; i < freq_cnt/2; i++)
+			swap(freqs[i], freqs[freq_cnt - i - 1]);
 
 	clk_api_unlock();
 
@@ -347,7 +418,7 @@ int brcm_reset_assert(unsigned int reset_id)
 	int ret;
 	u32 params = reset_id - BRST_SW_OFFSET;
 
-	if (reset_id <= BRST_SW_OFFSET || reset_id >= BRST_SW_NUM_CORES)
+	if (params >= BRST_SW_NUM_CORES)
 		return -EINVAL;
 
 	clk_api_lock();
@@ -366,7 +437,7 @@ int brcm_reset_deassert(unsigned int reset_id)
 	int ret;
 	u32 params = reset_id - BRST_SW_OFFSET;
 
-	if (reset_id <= BRST_SW_OFFSET || reset_id >= BRST_SW_NUM_CORES)
+	if (params >= BRST_SW_NUM_CORES)
 		return -EINVAL;
 
 	clk_api_lock();
@@ -401,6 +472,29 @@ EXPORT_SYMBOL(brcm_overtemp_reset);
 #include <linux/debugfs.h>
 
 static struct dentry *rootdir;
+
+static int brcm_scmi_stats_show(struct seq_file *s, void *data)
+{
+	int ret;
+
+	clk_api_lock();
+	ret = brcm_send_show_cmd_via_scmi(s, handle, BRCM_SCMI_STATS_SHOW_CMD);
+	clk_api_unlock();
+
+	return ret;
+}
+
+static int brcm_scmi_stats_reset(void)
+{
+	int ret;
+	u32 param;
+
+	ret = brcm_send_cmd_via_scmi(handle, BRCM_SCMI_STATS_RESET_CMD,
+				     0, SCMI_PROTOCOL_BRCM, 0, 0, &param);
+	clk_api_unlock();
+
+	return ret;
+}
 
 static int brcm_scmi_clk_summary_show(struct seq_file *s, void *data)
 {
@@ -444,22 +538,19 @@ static int uint_from_buf(const char *ubuf, size_t len, unsigned int *result)
 	return kstrtouint(buf, 10, result);
 }
 
-static int get_all_pmap_freq_info(int core_id, unsigned int *num_pstates,
-				  unsigned int *cur_pstate, unsigned int *freqs)
+static int brcm_scmi_stats_summary_open(struct inode *inode, struct file *file)
 {
-	int ret;
-
-	ret = brcm_pmap_num_pstates(core_id, num_pstates);
-	if (ret < 0)
-		return ret;
-	if (*num_pstates > MAX_PSTATES)
-		return -EINVAL;
-	ret = brcm_pmap_get_pstate(core_id, cur_pstate);
-	if (ret < 0)
-		return ret;
-	return brcm_pmap_get_pstate_freqs(core_id, freqs);
+	return single_open(file, brcm_scmi_stats_show, inode->i_private);
 }
 
+static ssize_t brcm_scmi_stats_reset_write(struct file *filp,
+					   const char __user *ubuf,
+					   size_t len, loff_t *offp)
+{
+	int ret = brcm_scmi_stats_reset();
+
+	return ret ? ret : len;
+}
 
 static int brcm_scmi_clk_summary_open(struct inode *inode, struct file *file)
 {
@@ -535,10 +626,14 @@ static ssize_t brcm_scmi_pmap_all_freqs(struct file *filp, char __user *ubuf,
 {
 	int ret, i;
 	char buf[16 * MAX_PSTATES];
-	unsigned int freqs[MAX_PSTATES], size, num_pstates, cur_pstate;
+	unsigned int freqs[MAX_PSTATES], size, num_pstates;
 	const int core_id = filp_to_core_id(filp);
 
-	ret = get_all_pmap_freq_info(core_id, &num_pstates, &cur_pstate, freqs);
+	ret = brcm_pmap_get_pstate_freqs(core_id, freqs);
+	if (ret)
+		return ret;
+
+	ret = brcm_pmap_num_pstates(core_id, &num_pstates);
 	if (ret < 0)
 		return ret;
 
@@ -601,6 +696,16 @@ static ssize_t brcm_scmi_pmap_num_pstates(struct file *filp, char __user *ubuf,
 }
 
 
+static const struct file_operations brcm_scmi_stats_reset_fops = {
+	.write		= brcm_scmi_stats_reset_write,
+};
+
+static const struct file_operations brcm_scmi_stats_summary_fops = {
+	.open		= brcm_scmi_stats_summary_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
 
 static const struct file_operations brcm_scmi_clk_summary_fops = {
 	.open		= brcm_scmi_clk_summary_open,
@@ -668,11 +773,23 @@ static int brcm_scmi_debug_init(void)
 	if (!d)
 		return -ENOMEM;
 
+	d = debugfs_create_file("stats_summary", 0644, rootdir, NULL,
+				&brcm_scmi_stats_summary_fops);
+
+	if (!d)
+		return -ENOMEM;
+
+	d = debugfs_create_file("stats_reset", 0644, rootdir, NULL,
+				&brcm_scmi_stats_reset_fops);
+
+	if (!d)
+		return -ENOMEM;
+
 	d_cores = debugfs_create_dir("pmap_cores", rootdir);
 	if (!d_cores)
 		return -ENOMEM;
 
-	for (i = 0; i < BCLK_SW_NUM_CORES - BCLK_SW_OFFSET; i++) {
+	for (i = 0; i < BCLK_SW_NUM_CORES; i++) {
 		struct dentry *d_core;
 
 		if (brcm_pmap_num_pstates(i + BCLK_SW_OFFSET, &n))

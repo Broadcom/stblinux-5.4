@@ -19,10 +19,6 @@ static inline u32 BRCM_REV(u32 reg)
 u32 brcmstb_get_family_id(void);
 u32 brcmstb_get_product_id(void);
 
-struct brcmstb_bootloader_dtu_table;
-
-int dtu_save(void);
-int brcmstb_dtusave_init(struct brcmstb_bootloader_dtu_table *tbl);
 int brcmstb_regsave_init(void);
 
 #ifdef CONFIG_BRCMSTB_MEMORY_API

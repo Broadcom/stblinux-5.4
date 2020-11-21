@@ -329,10 +329,8 @@ static int gic_irq_set_vcpu_affinity(struct irq_data *d, void *vcpu)
 static int gic_set_affinity(struct irq_data *d, const struct cpumask *mask_val,
 			    bool force)
 {
-	void __iomem *reg = gic_dist_base(d) + GIC_DIST_TARGET + (gic_irq(d) & ~3);
-	unsigned int cpu, shift = (gic_irq(d) % 4) * 8;
-	u32 val, mask, bit;
-	unsigned long flags;
+	void __iomem *reg = gic_dist_base(d) + GIC_DIST_TARGET + gic_irq(d);
+	unsigned int cpu;
 
 	if (!force)
 		cpu = cpumask_any_and(mask_val, cpu_online_mask);
@@ -342,13 +340,7 @@ static int gic_set_affinity(struct irq_data *d, const struct cpumask *mask_val,
 	if (cpu >= NR_GIC_CPU_IF || cpu >= nr_cpu_ids)
 		return -EINVAL;
 
-	gic_lock_irqsave(flags);
-	mask = 0xff << shift;
-	bit = gic_cpu_map[cpu] << shift;
-	val = readl_relaxed(reg) & ~mask;
-	writel_relaxed(val | bit, reg);
-	gic_unlock_irqrestore(flags);
-
+	writeb_relaxed(gic_cpu_map[cpu], reg);
 	irq_data_update_effective_affinity(d, cpumask_of(cpu));
 
 	return IRQ_SET_MASK_OK_DONE;
@@ -384,15 +376,9 @@ static void __exception_irq_entry gic_handle_irq(struct pt_regs *regs)
 			 *
 			 * Pairs with the write barrier in gic_raise_softirq
 			 */
-			if (irqnr < NR_IPI) {
-				smp_rmb();
-				handle_IPI(irqnr, regs);
-			} else
+			smp_rmb();
+			handle_IPI(irqnr, regs);
 #endif
-			{
-				isb();
-				handle_domain_irq(gic->domain, irqnr, regs);
-			}
 			continue;
 		}
 		break;
@@ -984,7 +970,7 @@ static int gic_irq_domain_map(struct irq_domain *d, unsigned int irq,
 {
 	struct gic_chip_data *gic = d->host_data;
 
-	if (hw < NR_IPI || (hw > 16 && hw < 32)) {
+	if (hw < 32) {
 		irq_set_percpu_devid(irq);
 		irq_domain_set_info(d, irq, hw, &gic->chip, d->host_data,
 				    handle_percpu_devid_irq, NULL, NULL);
@@ -1011,38 +997,20 @@ static int gic_irq_domain_translate(struct irq_domain *d,
 		if (fwspec->param_count < 3)
 			return -EINVAL;
 
-		/* Do not try to map unknown interrupt types */
-		if (fwspec->param[0] > 2)
-			return -EINVAL;
+		/* Get the interrupt number and add 16 to skip over SGIs */
+		*hwirq = fwspec->param[1] + 16;
 
-		*hwirq = fwspec->param[1];
-		switch (fwspec->param[0]) {
-		case 0:
-			/*
-			 * For SPIs, we need to add 16 more to get the GIC irq
-			 * ID number
-			 */
+		/*
+		 * For SPIs, we need to add 16 more to get the GIC irq
+		 * ID number
+		 */
+		if (!fwspec->param[0])
 			*hwirq += 16;
-			/* fall through */
-		case 1:
-			/* Add 16 to skip over SGIs */
-			*hwirq += 16;
-			*type = fwspec->param[2] & IRQ_TYPE_SENSE_MASK;
 
-			/* Make it clear that broken DTs are... broken */
-			WARN_ON(*type == IRQ_TYPE_NONE);
-			break;
-		case 2:
-			/* Refuse to map internal IPIs */
-			if (*hwirq < NR_IPI)
-				return -EPERM;
+		*type = fwspec->param[2] & IRQ_TYPE_SENSE_MASK;
 
-			/* Cannot change the SGIs interrupt type */
-			*type = IRQ_TYPE_NONE;
-			break;
-		default:
-			break;
-		}
+		/* Make it clear that broken DTs are... broken */
+		WARN_ON(*type == IRQ_TYPE_NONE);
 		return 0;
 	}
 

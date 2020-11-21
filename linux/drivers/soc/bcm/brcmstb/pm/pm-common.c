@@ -17,6 +17,7 @@
 #include <linux/brcmstb/brcmstb.h>
 #include <linux/brcmstb/memory_api.h>
 #include <linux/soc/brcmstb/brcmstb.h>
+#include <linux/seq_file.h>
 
 #ifdef CONFIG_BRCMSTB_PM_DEBUG
 #include <linux/debugfs.h>

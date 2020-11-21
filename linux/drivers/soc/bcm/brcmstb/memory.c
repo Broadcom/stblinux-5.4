@@ -38,9 +38,13 @@
 #include <asm/tlbflush.h>
 #include <linux/pfn_t.h>
 #include <linux/pagewalk.h>
+#include <linux/memory_hotplug.h>
 #ifdef CONFIG_ARM
 #include <asm/early_ioremap.h>
 #endif
+
+extern unsigned long __initramfs_size;
+
 /* -------------------- Constants -------------------- */
 
 #define DEFAULT_LOWMEM_PCT	20  /* used if only one membank */
@@ -77,7 +81,7 @@ enum {
 	BUSNUM_MCP2 = 0x6,
 };
 
-#ifdef KASAN_SHADOW_SCALE_SHIFT
+#if defined(CONFIG_KASAN) && defined(KASAN_SHADOW_SCALE_SHIFT)
 #define BMEM_LARGE_ENOUGH	(SZ_1G - (SZ_1G >> KASAN_SHADOW_SCALE_SHIFT))
 #else
 #define BMEM_LARGE_ENOUGH	(SZ_1G)
@@ -94,7 +98,7 @@ struct kva_map {
 static LIST_HEAD(kva_map_list);
 static DEFINE_MUTEX(kva_map_lock);
 
-const enum brcmstb_reserve_type brcmstb_default_reserve = BRCMSTB_RESERVE_BMEM;
+const enum brcmstb_reserve_type brcmstb_default_reserve = BRCMSTB_RESERVE_BHPA;
 bool brcmstb_memory_override_defaults = false;
 bool brcmstb_bmem_is_bhpa = false;
 
@@ -105,6 +109,11 @@ static spinlock_t automap_lock = __SPIN_LOCK_UNLOCKED(automap_lock);
 #endif
 
 /* -------------------- Functions -------------------- */
+static void __maybe_unused brcm_online_callback(struct page *page,
+						unsigned int order)
+{
+	/* Do Nothing */
+}
 
 /*
  * If the DT nodes are handy, determine which MEMC holds the specified
@@ -115,12 +124,16 @@ int __brcmstb_memory_phys_addr_to_memc(phys_addr_t pa, void __iomem *base,
 				       const char *compat)
 {
 	const char *bcm7211_biuctrl_match = "brcm,bcm7211-cpu-biu-ctrl";
+	const char *bcm72113_biuctrl_match = "brcm,bcm72113-cpu-biu-ctrl";
 	int memc = -1;
 	int i;
 
 	/* Single MEMC controller with unreadable ULIMIT values as of the A0 */
 	if (!strncmp(compat, bcm7211_biuctrl_match,
 		     strlen(bcm7211_biuctrl_match)))
+		return 0;
+	if (!strncmp(compat, bcm72113_biuctrl_match,
+		     strlen(bcm72113_biuctrl_match)))
 		return 0;
 
 	for (i = 0; i < NUM_BUS_RANGES; i++, base += 8) {
@@ -505,7 +518,7 @@ static void range_truncate(phys_addr_t addr, phys_addr_t *size)
 	 */
 	for (i = 0; i < count; i++) {
 		rmem = __reserved_mem_get_entry(i);
-		if (rmem_within_range(rmem, &range) && rmem->reserved_name)
+		if (rmem_within_range(rmem, &range) && rmem->reserved_name[0])
 			*size -= rmem->size;
 	}
 }
@@ -533,7 +546,7 @@ static bool rmem_insert_into_range(struct reserved_mem *rmem,
 	/* This region does not have a name, it must be part of its larger
 	 * range then.
 	 */
-	if (!rmem->reserved_name)
+	if (!rmem->reserved_name[0])
 		return false;
 
 	/* If we have memory below us, we should report it but we also need to
@@ -661,7 +674,7 @@ static int brcmstb_populate_reserved(void)
 
 		prop = fdt_get_property(fdt, offset, "reg", &lenp);
 		cellslen = (int)sizeof(u32) * (addr_cells + size_cells);
-		if ((lenp % cellslen) != 0 || !prop->data)
+		if ((lenp % cellslen) != 0)
 			goto out;
 
 		addr = 0;
@@ -980,7 +993,7 @@ static __init int memc_reserve(int memc, u64 addr, u64 size, void *context)
 		return 0;
 	}
 
-#ifdef KASAN_SHADOW_SCALE_SHIFT
+#if defined(CONFIG_KASAN) && defined(KASAN_SHADOW_SCALE_SHIFT)
 	/* KASAN requires a fraction of the memory */
 	addr += size >> KASAN_SHADOW_SCALE_SHIFT;
 	size = end - addr;
@@ -988,6 +1001,16 @@ static __init int memc_reserve(int memc, u64 addr, u64 size, void *context)
 
 	if (!ctx->count++) {	/* First Bank */
 		limit = (u64)memblock_get_current_limit();
+
+#ifdef CONFIG_BLK_DEV_INITRD
+		/* Assume that a compressed initramfs will expand roughly to 5
+		 * times its compressed size. Determining its exact size early
+		 * on boot with no memory allocator available is not possible
+		 * since decompressors assume kmalloc() is available.
+		 */
+		addr += __initramfs_size * 5;
+		size = end - addr;
+#endif
 		/*
 		 *  On ARM64 systems, force the first memory controller
 		 * to be partitioned the same way it would on ARM
@@ -1007,7 +1030,8 @@ static __init int memc_reserve(int memc, u64 addr, u64 size, void *context)
 				return 0;
 			}
 
-			if (brcmstb_default_reserve == BRCMSTB_RESERVE_BMEM) {
+			if (brcmstb_default_reserve == BRCMSTB_RESERVE_BMEM ||
+			    brcmstb_default_reserve == BRCMSTB_RESERVE_BHPA) {
 				if (size <= SZ_128M)
 					return 0;
 
@@ -1117,6 +1141,9 @@ void __init brcmstb_memory_init(void)
 #endif
 #ifdef CONFIG_BRCMSTB_HUGEPAGES
 	brcmstb_bhpa_reserve();
+#endif
+#ifdef CONFIG_MEMORY_HOTPLUG
+	set_online_page_callback(brcm_online_callback);
 #endif
 }
 
