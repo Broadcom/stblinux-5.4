@@ -42,6 +42,7 @@
 #ifdef CONFIG_ARM
 #include <asm/early_ioremap.h>
 #endif
+#include <asm/fixmap.h>
 
 extern unsigned long __initramfs_size;
 
@@ -1003,12 +1004,12 @@ static __init int memc_reserve(int memc, u64 addr, u64 size, void *context)
 		limit = (u64)memblock_get_current_limit();
 
 #ifdef CONFIG_BLK_DEV_INITRD
-		/* Assume that a compressed initramfs will expand roughly to 5
+		/* Assume that a compressed initramfs will expand roughly to 10
 		 * times its compressed size. Determining its exact size early
 		 * on boot with no memory allocator available is not possible
 		 * since decompressors assume kmalloc() is available.
 		 */
-		addr += __initramfs_size * 5;
+		addr += __initramfs_size * 10;
 		size = end - addr;
 #endif
 		/*
@@ -1627,3 +1628,56 @@ void brcmstb_hugepage_free(unsigned int memcIndex, const uint64_t *pages,
 	return brcmstb_hpa_free(memcIndex, pages, count);
 }
 EXPORT_SYMBOL(brcmstb_hugepage_free);
+
+void *brcmstb_ioremap(phys_addr_t phys_addr, size_t size)
+{
+	unsigned long last_addr;
+	unsigned long offset = phys_addr & ~PAGE_MASK;
+	int err;
+	unsigned long addr;
+	struct vm_struct *area;
+
+	/*
+	 * Page align the mapping address and size, taking account of any
+	 * offset.
+	 */
+	phys_addr &= PAGE_MASK;
+	size = PAGE_ALIGN(size + offset);
+
+	/*
+	 * Don't allow wraparound, zero size or outside PHYS_MASK.
+	 */
+	last_addr = phys_addr + size - 1;
+	if (!size || last_addr < phys_addr || (last_addr & ~PHYS_MASK))
+		return NULL;
+
+	area = get_vm_area_caller(size, VM_IOREMAP,
+				  __builtin_return_address(0));
+	if (!area)
+		return NULL;
+	addr = (unsigned long)area->addr;
+	area->phys_addr = phys_addr;
+
+	err = ioremap_page_range(addr, addr + size, phys_addr,
+				 FIXMAP_PAGE_IO);
+	if (err) {
+		vunmap((void *)addr);
+		return NULL;
+	}
+
+	return (void __iomem *)(offset + addr);
+}
+EXPORT_SYMBOL(brcmstb_ioremap);
+
+void brcmstb_iounmap(volatile void __iomem *io_addr)
+{
+	unsigned long addr = (unsigned long)io_addr & PAGE_MASK;
+
+	/*
+	 * We could get an address outside vmalloc range in case
+	 * of ioremap_cache() reusing a RAM mapping.
+	 */
+	if (is_vmalloc_addr((void *)addr))
+		vunmap((void *)addr);
+}
+EXPORT_SYMBOL(brcmstb_iounmap);

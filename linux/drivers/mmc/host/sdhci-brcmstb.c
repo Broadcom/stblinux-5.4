@@ -315,11 +315,7 @@ err_clk:
 
 static void sdhci_brcmstb_shutdown(struct platform_device *pdev)
 {
-	struct sdhci_host *host = platform_get_drvdata(pdev);
-	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
-
-	sdhci_remove_host(host, 1);
-	clk_disable_unprepare(pltfm_host->clk);
+	sdhci_pltfm_suspend(&pdev->dev);
 }
 
 MODULE_DEVICE_TABLE(of, sdhci_brcm_of_match);
